@@ -1,0 +1,182 @@
+---
+title: "Predicting Troops Data Assembly"
+author: "Michael E Flynn"
+date: "3/17/2021"
+output: html_document
+---
+
+
+```{r setup}
+library(tidyverse)
+library(troopdata)
+library(peacesciencer)
+library(cshapes)
+library(ggtext)
+library(broom)
+library(here)
+library(tictoc)
+
+knitr::opts_chunk$set(echo = FALSE, dpi = 400, fig.height = 5, fig.width = 8)
+
+theme_flynn <- theme_linedraw() + theme(text = element_markdown(size = 11),
+                                        plot.title = element_markdown(size = 16),
+                                        plot.subtitle = element_markdown(size = 12),
+                                        plot.caption = element_markdown(face = "italic", size = 8),
+                                        strip.background = element_rect(fill = "gray80", color = "black"),
+                                        strip.text = element_text(color = "black", face = "bold"),
+                                        panel.grid.major = element_line(color = "gray70", size = 0.5),
+                                        panel.grid.minor = element_line(color = "gray90", size = 0.25),
+                                        axis.title = element_text(face = "bold", size = 12),
+                                        axis.title.y = element_text(margin = margin(t = 0, r = 0.5, b = 0, l = 0, unit = "cm")),
+                                        axis.title.x = element_text(margin = margin(t = 0.5, r = 0, b = 0, l = 0, unit = "cm")),
+                                        legend.title = element_text(face = "bold"))
+
+```
+
+
+# Read in data for assembly 
+
+```{r data assembly, echo=FALSE, message=FALSE}
+
+
+#### Create base data ####
+basedata <- peacesciencer::create_dyadyears(system = "cow") %>% 
+  filter(ccode1 == 2 & year >= 1950) %>% 
+  add_cow_alliance() %>% 
+  add_cow_trade() %>% 
+  add_democracy() %>% 
+  add_nmc() %>% 
+  add_mids()
+
+
+
+#### US Ongoing War List ####
+# Note there's no overlap in sides here. Any state the US is paired with here is automatically on a different side. That is, the US is fighting them. 
+us.interstate.wars <- read_csv(here("../Data/Inter-StateWarData_v4.0.csv")) %>% 
+  group_by(WarNum) %>% 
+  filter(any(ccode == 2)) %>%
+  filter(Side != Side[ccode == 2]) %>%
+  dplyr::rowwise() %>% 
+  dplyr::mutate(year = list(seq(`StartYear1`, `EndYear1`))) %>% 
+  unnest(year) %>% 
+  filter(year>= 1950)
+
+#### US extrasystemic wars ####
+us.extraystemic.wars <- read_csv(here("../Data/Extra-StateWarData_v4.0.csv")) %>% 
+  group_by(WarNum) %>% 
+  filter(any(ccode1 == 2 | ccode2 == 2))
+
+
+# PRIO Data
+# https://ucdp.uu.se/downloads/
+prio.data <- read_csv(here("../Data/ucdp-prio-acd-191.csv")) %>% 
+  rowwise() %>% 
+  select("conflict_id", "year", "intensity_level", "gwno_loc") %>% 
+  separate(gwno_loc, sep = ",", into = c("ccode1", "ccode2", "ccode3", "ccode4" ,"ccode5", "ccode6")) %>% 
+  pivot_longer(cols = c("ccode1", "ccode2", "ccode3", "ccode4", "ccode5", "ccode6"), 
+               names_to = "countrynum", 
+               values_to = "ccode", 
+               values_drop_na = TRUE,
+               names_repair = "minimal") %>% 
+  mutate(ccode = as.numeric(trimws(ccode, which = "both")),
+         intensity.low = if_else(intensity_level == 1, 1, 0),
+         intensity.high = if_else(intensity_level == 2, 1, 0)) %>% 
+  group_by(ccode, year) %>% # Gleditsch and Ward location country code and year
+  dplyr::summarise(conflictcount = n_distinct(conflict_id),
+            conflictcount_high = sum(intensity.high, na.rm = TRUE),
+            conflictcount_low = sum(intensity.low, na.rm = TRUE),
+            conflict_dummy = if_else(conflictcount > 0, 1, 0)) %>% 
+  filter(year >= 1950)
+
+
+# PRIO data for spatial analysis
+prio.sp <- prio.data %>% 
+  rename("ccode2" = "ccode")
+  
+
+# US War data using PRIO data
+prio.us <- read_csv(here("../Data/ucdp-prio-acd-191.csv")) %>% 
+  rowwise() %>% 
+  mutate(us_war = ifelse(grepl(".*United States.*", side_a), 1, 
+                             ifelse(grepl(".*United States.*", side_a_2nd), 1,
+                                    ifelse(grepl(".*United States", side_b), 1,
+                                           ifelse(grepl(".*United States.*", side_b_2nd), 1, 0))))) %>% 
+  filter(us_war == 1) %>% 
+  select("location", "conflict_id", "year", "intensity_level", "gwno_loc", "us_war") %>% 
+  separate(gwno_loc, sep = ",", into = c("ccode1", "ccode2", "ccode3", "ccode4" ,"ccode5", "ccode6")) %>% 
+  pivot_longer(cols = c("ccode1", "ccode2", "ccode3", "ccode4", "ccode5", "ccode6"), 
+               names_to = "countrynum", 
+               values_to = "ccode", 
+               values_drop_na = FALSE,
+               names_repair = "minimal") %>% 
+  mutate(ccode = as.numeric(trimws(ccode, which = "both"))) %>% 
+  filter(!is.na(ccode) & ccode != 2) %>% 
+  select(year, ccode, us_war) %>% 
+  group_by(ccode, year) %>% 
+  dplyr::summarise(us_war = max(us_war, na.rm = TRUE)) %>% 
+  filter(year >= 1950)
+
+# Spatial data sets
+prio.us.sp <- prio.us %>% 
+  rename("ccode2" = "ccode")
+
+
+#### Create mindist data ####
+
+if (file.exists(here("../Data/mindist-dataframe.csv"))) {
+  
+  mindist <- read_csv(here("../Data/mindist-dataframe.csv"))
+  
+} else {
+
+  tic()
+  startdate = as.Date("1950-01-01", format = "%Y-%m-%d")
+  enddate = as.Date("2016-01-01", format = "%Y-%m-%d")
+  datelist <- data.frame(date = as.Date(seq(startdate, enddate, by = "1 year"), format = "%y-%m-%d"))
+
+  thedate <- startdate
+
+  mindist <- as.list(datelist$date) # Create empty list 
+
+  mindist <- lapply(mindist, function(x) 
+    df <- cshapes::distlist(date = x, type = "mindist", tolerance = 0.5, useGW = FALSE) %>% 
+      mutate(year = x)
+  )
+
+  mindist <- bind_rows(mindist) %>% 
+    mutate(year = format(year, "%Y"))
+
+  write.csv(mindist, here("../Data/mindist-dataframe.csv"))
+
+toc()
+
+}
+
+# Extend minimum distance to 2020
+
+mindist.2 <- mindist %>% 
+  filter(year >= 2013) %>% 
+  mutate(year = year + 4)
+
+mindist <- mindist %>% 
+  bind_rows(mindist.2)
+
+#### Distance to key locations #### 
+
+strategic.locations <- c(365, 710, 731, 816, 812, 811, 645, 700, 345)
+
+strategic.distance <- mindist %>% 
+  arrange(ccode1, ccode2, year) %>% 
+  filter(ccode2 %in% strategic.locations & ccode1 != 2) 
+
+
+#### Troop Data ####
+troop.data <- get_troopdata(startyear = 1950, endyear = 2020, branch = TRUE)
+
+troop.data.sp <- troop.data %>% 
+  dplyr::rename("ccode2" = "ccode")
+
+
+#### Inverse distance measures ####
+```
+
