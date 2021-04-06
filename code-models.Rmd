@@ -1,0 +1,99 @@
+---
+title: "Predicting Troops Models"
+author: "Michael E Flynn"
+date: "3/30/2021"
+output: html_document
+---
+
+
+```{r setup, echo = FALSE, include = FALSE, warning = FALSE}
+library(tidyverse)
+library(troopdata)
+library(peacesciencer)
+library(cshapes)
+library(ggtext)
+library(ggdist)
+library(tidybayes)
+library(rstan)
+library(brms)
+library(broom)
+library(countrycode)
+library(here)
+library(tictoc)
+library(tidyquant)
+library(purrr)
+
+#devtools::install_github("svmiller/peacesciencer")
+
+knitr::opts_chunk$set(echo = FALSE, dpi = 400, fig.height = 5, fig.width = 8)
+
+theme_flynn <- theme_linedraw() + theme(text = element_markdown(size = 11),
+                                        plot.title = element_markdown(size = 16),
+                                        plot.subtitle = element_markdown(size = 12),
+                                        plot.caption = element_markdown(face = "italic", size = 8),
+                                        strip.background = element_rect(fill = "gray80", color = "black"),
+                                        strip.text = element_text(color = "black", face = "bold"),
+                                        panel.grid.major = element_line(color = "gray70", size = 0.5),
+                                        panel.grid.minor = element_line(color = "gray90", size = 0.25),
+                                        axis.title = element_text(face = "bold", size = 12),
+                                        axis.title.y = element_text(margin = margin(t = 0, r = 0.5, b = 0, l = 0, unit = "cm")),
+                                        axis.title.x = element_text(margin = margin(t = 0.5, r = 0, b = 0, l = 0, unit = "cm")),
+                                        legend.title = element_text(face = "bold"))
+
+
+data.clean <- read_csv(here::here("../Data/data-predicting-troops.csv")) 
+
+
+data.clean.us <- data.clean %>% 
+  dplyr::filter(ccode1 == 2)
+
+```
+
+
+
+# Models
+
+## Lognormal models
+
+
+```{r echo = FALSE, message=FALSE}
+
+CHAINS <- 4
+CORES <- 4
+ITER <- 2000
+WARMUP <- 1000
+THIN <- 1
+
+PRIOR <- c(set_prior("normal(0,2)", class = "b"))
+                         
+
+us.1 <- brm(bf(troops ~ troops_lag_log + us_war + (1 | ccode2),
+               hu ~ troops_lag_log + us_war + (1 | ccode2)),
+            data = data.clean.us,
+            family = hurdle_lognormal(link = "identity", 
+                                      link_sigma = "log",
+                                      link_hu = "logit"),
+            prior = PRIOR,
+            iter = ITER,
+            warmup = WARMUP,
+            cores = CORES,
+            chains = CHAINS,
+            thin = THIN,
+            backend = "cmdstanr")
+
+us.2 <- brm(bf(troops ~ us_war + ar(time = time, gr = ccode2) + (1 | ccode2),
+               hu ~ us_war + (1 | ccode2),
+               sigma ~ us_war),
+            data = data.clean.us,
+            family = hurdle_lognormal(link = "identity", 
+                                      link_sigma = "log",
+                                      link_hu = "logit"),
+            prior = PRIOR,
+            iter = ITER,
+            warmup = WARMUP,
+            cores = CORES,
+            chains = CHAINS,
+            thin = THIN,
+            backend = "cmdstanr")
+
+```
